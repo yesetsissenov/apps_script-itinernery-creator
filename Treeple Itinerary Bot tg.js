@@ -26,15 +26,11 @@ function doPost(e) {
   try {
     const update = safeJsonParse_(e && e.postData && e.postData.contents);
     if (update) {
-    if (isDuplicateUpdate_(update)) return HtmlService.createHtmlOutput("OK");
-    handleUpdate_(update);
-  }
+      // ВАЖНО: дедуп update_id (убирает дубли и “пачки”)
+      if (isDuplicateUpdate_(update)) return HtmlService.createHtmlOutput("OK");
+      handleUpdate_(update);
+    }
 
-
-    // ВАЖНО: дедуп update_id (убирает дубли и “пачки”)
-    if (isDuplicateUpdate_(update)) return HtmlService.createHtmlOutput("OK");
-
-    handleUpdate_(update);
     return HtmlService.createHtmlOutput("OK");
   } catch (err) {
     console.error(err && err.stack ? err.stack : err);
@@ -225,7 +221,8 @@ function onMessage_(m) {
     return t;
   }
 
-  function validateItin_(obj) {
+  function validateItin_(obj, opts) {
+    if (typeof validateItinStruct_ === "function") return validateItinStruct_(obj, opts || {});
     if (!obj || typeof obj !== "object") return null;
     if (!obj.meta || !obj.days || !Array.isArray(obj.days) || !obj.days.length) return null;
 
@@ -315,22 +312,44 @@ function onMessage_(m) {
       return sendLongMessage_(chatId, d0);
     }
 
-     // /docs = alias for /done
-     if (c === "/docs") c = "/done";
-
      if (c === "/done") {
-     var itDone = getItin_();
-     if (!itDone) return sendMessage_(chatId, "No itinerary to export. Use /new (or /gen).");
-
      var requestId = (sess && sess.data && sess.data.requestId) ? String(sess.data.requestId) : "";
 
      // fallback: если вдруг session потерялась, попробуем взять последний requestId из Script Properties
      if (!requestId) {
      requestId = String(PropertiesService.getScriptProperties().getProperty("LAST_REQUEST_ID_" + chatId) || "").trim();
      }
+     if (!requestId) {
+       return sendMessage_(chatId, "No requestId found. Use /new to generate a request first.");
+     }
+
+     var itDone = null;
+     var sp = PropertiesService.getScriptProperties();
+     var rawByReq = sp.getProperty("ITIN_" + requestId);
+     if (rawByReq) {
+       try { itDone = JSON.parse(rawByReq); } catch (_) { itDone = null; }
+     }
+     if (!itDone) itDone = getItin_();
+     if (!itDone) {
+       var rawLast = sp.getProperty("LAST_ITIN_JSON");
+       if (rawLast) {
+         try { itDone = JSON.parse(rawLast); } catch (_) { itDone = null; }
+       }
+     }
+     if (!itDone) return sendMessage_(chatId, "No itinerary to export. Use /new (or /gen).");
+     sp.setProperty("LAST_REQUEST_ID_" + chatId, requestId);
+     sp.setProperty("ITIN_" + requestId, JSON.stringify(itDone));
 
      sendMessage_(chatId, "⏳ Creating Google Doc from season template...");
-     var url = exportDocForChat(chatId, requestId); // requestId может быть пустым — см. новый DocsExport.gs ниже
+     var url = "";
+     try {
+       url = exportDocForChat(chatId, requestId);
+     } catch (eDoc) {
+       var msg = (eDoc && eDoc.message) ? eDoc.message : String(eDoc);
+       var hint = "Please verify TEMPLATE_*_ID, template access, and Web App deployment (Execute as Me, Anyone access).";
+       sendMessage_(chatId, "❌ Doc export failed: " + msg + "\n" + hint);
+       return;
+     }
 
      // синк в days sheet (если есть)
      try { upsertDays_(requestId, itDone); } catch (e) {}
@@ -351,7 +370,7 @@ function onMessage_(m) {
       }
 
       var it = gen_generateItineraryStruct_(req0);
-      it = validateItin_(it);
+      it = validateItin_(it, { strict: false });
       if (!it) return sendMessage_(chatId, "❌ Generator returned invalid structure.");
 
       setItin_(it);
@@ -367,6 +386,10 @@ function onMessage_(m) {
       sess.data.req = req0;
       sess.data.requestId = reqId;
       setSession_(chatId, sess);
+      if (reqId) {
+        PropertiesService.getScriptProperties().setProperty("LAST_REQUEST_ID_" + chatId, String(reqId));
+        PropertiesService.getScriptProperties().setProperty("ITIN_" + String(reqId), JSON.stringify(it));
+      }
 
       // ✅ AUTO EXPORT
       if (typeof exportDocForChat !== "function") {
@@ -376,7 +399,7 @@ function onMessage_(m) {
       var url = exportDocForChat(chatId, reqId);
       sendMessage_(chatId, "✅ Google Doc:\n" + url);
 
-      sendMessage_(chatId, "✅ Draft generated (STRUCT). Send edits in ONE message (any message counts as edit). Commands: /show /docs");
+      sendMessage_(chatId, "✅ Updated. Reply with another edit, or type /done to export again. Use /show to view.");
       return sendLongMessage_(chatId, preview);
     }
 
@@ -411,7 +434,9 @@ function onMessage_(m) {
          "- Keep dates unless user explicitly changes dates.\n" +
          "- time/location/overnight MUST include labels exactly: 'Time:', 'Visited Locations:', 'Overnight:' (or be empty).\n" +
          "- Each description MUST be 20–35 words (not shorter).\n" +
-         "- Be realistic: late arrivals = no sightseeing. Long day trips = early start + late return.\n\n" +
+         "- Be realistic: late arrivals = no sightseeing. Long day trips = early start + late return.\n" +
+         "- Arrival day: if arrival >= 18:00, only transfer/check-in/dinner/rest.\n" +
+         "- Departure day: only checkout + airport transfer, no long tours.\n\n" +
          "CURRENT_JSON:\n" + JSON.stringify(itCur) + "\n\n" +
          "USER_EDITS:\n" + editText;
 
@@ -420,7 +445,7 @@ function onMessage_(m) {
        var parsed = null;
        try { parsed = JSON.parse(extractJson_(raw)); } catch (e) { parsed = null; }
 
-       parsed = validateItin_(parsed);
+       parsed = validateItin_(parsed, { strict: true });
        if (!parsed) return sendMessage_(chatId, "❌ Edit failed (invalid JSON). Try simpler edit.");
 
         // post-fix logic + description length
@@ -437,6 +462,10 @@ function onMessage_(m) {
        var requestId = (sess && sess.data && sess.data.requestId) ? String(sess.data.requestId) : "";
        if (!requestId) {
        requestId = PropertiesService.getScriptProperties().getProperty("LAST_REQUEST_ID_" + chatId) || "";
+       }
+       if (requestId) {
+         PropertiesService.getScriptProperties().setProperty("LAST_REQUEST_ID_" + chatId, String(requestId));
+         PropertiesService.getScriptProperties().setProperty("ITIN_" + String(requestId), JSON.stringify(parsed));
        }
 
        var docUrl = "";
@@ -572,7 +601,7 @@ function onMessage_(m) {
         throw e2;
        }
 
-       itNew = validateItin_(itNew);
+       itNew = validateItin_(itNew, { strict: false });
        if (!itNew) {
         clearSession_(chatId);
         return sendMessage_(chatId, "❌ Generator returned invalid structure.");
@@ -590,6 +619,7 @@ function onMessage_(m) {
 
        setSession_(chatId, { state: "EDIT_ITIN", data: { req: req, requestId: requestId } });
 
+       sendMessage_(chatId, "✅ Updated. Reply with another edit, or type /done to export again. Use /show to view.");
        // если ты хочешь авто-экспорт тут — оставь как есть у себя
        return sendLongMessage_(chatId, preview);
       }
