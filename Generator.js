@@ -203,6 +203,70 @@ function gen_formatStructAsText_(it) {
   return out.join("\n").trim();
 }
 
+function gen_wordCount_(text) {
+  var cleaned = String(text || "")
+    .replace(/[^A-Za-z0-9'\-\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return 0;
+  return cleaned.split(" ").filter(function (w) { return w; }).length;
+}
+
+function gen_ensureMinWords_(text, min, max, opts) {
+  opts = opts || {};
+  min = Number(min || 20);
+  max = Number(max || 35);
+  var base = String(text || "").trim();
+  var count = gen_wordCount_(base);
+
+  if (count < min) {
+    if (opts.allowOpenAI && gen_useOpenAI_() && typeof openAiText_ === "function") {
+      var prompt =
+        "Expand the following day description to " + min + "–" + max + " words.\n" +
+        "Rules: keep facts and locations unchanged, no new places, professional tour-operator tone.\n" +
+        "Return only the revised sentence(s), no quotes or markdown.\n\n" +
+        "TEXT:\n" + base;
+      var expanded = String(openAiText_(prompt, { model: gen_openAiModel_(), max_output_tokens: 200 }) || "").trim();
+      if (expanded) {
+        base = expanded;
+        count = gen_wordCount_(base);
+      }
+    }
+
+    if (count < min) {
+      var pads = [
+        "Your guide will help keep the pace comfortable with short breaks and photo stops along the way.",
+        "Transfers are arranged for comfort and safety, with time to relax between highlights.",
+        "Enjoy a smooth itinerary flow with easy logistics and time for rest."
+      ];
+      var idx = 0;
+      while (count < min && idx < pads.length) {
+        base = (base + " " + pads[idx]).replace(/\s+/g, " ").trim();
+        count = gen_wordCount_(base);
+        idx++;
+      }
+    }
+  }
+
+  if (count > max) {
+    if (opts.allowOpenAI && gen_useOpenAI_() && typeof openAiText_ === "function") {
+      var prompt2 =
+        "Shorten the following day description to " + min + "–" + max + " words.\n" +
+        "Rules: keep facts and locations unchanged, no new places.\n" +
+        "Return only the revised sentence(s), no quotes or markdown.\n\n" +
+        "TEXT:\n" + base;
+      var shortened = String(openAiText_(prompt2, { model: gen_openAiModel_(), max_output_tokens: 200 }) || "").trim();
+      if (shortened) base = shortened;
+    } else {
+      var words = base.split(/\s+/);
+      base = words.slice(0, max).join(" ").replace(/\s+/g, " ").trim();
+      if (base && base.slice(-1) !== ".") base += ".";
+    }
+  }
+
+  return base;
+}
+
 /** ===================== FIELD GUESSING ===================== **/
 
 function gen_guessFields_(i, totalDays, city, title, text, arrivalTime, departureTime) {
@@ -988,3 +1052,92 @@ function testGeneratorLocal() {
   Logger.log(out);
 }
 
+function testGen_ArrivalLate() {
+  var req = {
+    city: "Almaty",
+    start: "15.01.2026",
+    days: 5,
+    pax: 2,
+    kids: 0,
+    arrivalTime: "19:30",
+    departureTime: "10:10",
+    notes: ""
+  };
+  var it = gen_generateItineraryStruct_(req);
+  var day1 = it.days[0] || {};
+  if (!/Arrival, Transfer, Dinner, Rest/i.test(day1.name || "")) {
+    throw new Error("Late arrival rule failed: Day 1 name mismatch.");
+  }
+  if (!/^Time:/i.test(day1.time || "")) {
+    throw new Error("Late arrival rule failed: Day 1 time missing prefix.");
+  }
+  Logger.log("testGen_ArrivalLate OK");
+}
+
+function testGen_DepartureDay() {
+  var req = {
+    city: "Almaty",
+    start: "15.01.2026",
+    days: 5,
+    pax: 2,
+    kids: 0,
+    arrivalTime: "10:00",
+    departureTime: "10:10",
+    notes: ""
+  };
+  var it = gen_generateItineraryStruct_(req);
+  var last = it.days[it.days.length - 1] || {};
+  if (!/Hotel, Airport/i.test(last.location || "")) {
+    throw new Error("Departure rule failed: last day locations incorrect.");
+  }
+  if (!/^Time:/i.test(last.time || "")) {
+    throw new Error("Departure rule failed: last day time missing prefix.");
+  }
+  Logger.log("testGen_DepartureDay OK");
+}
+
+function testGen_MinWords_AllDays() {
+  var req = {
+    city: "Almaty",
+    start: "15.01.2026",
+    days: 7,
+    pax: 4,
+    kids: 1,
+    arrivalTime: "12:00",
+    departureTime: "18:00",
+    notes: ""
+  };
+  var it = gen_generateItineraryStruct_(req);
+  for (var i = 0; i < it.days.length; i++) {
+    var count = gen_wordCount_(it.days[i].description);
+    if (count < 20) {
+      throw new Error("Min words rule failed on day " + (i + 1) + ": " + count);
+    }
+  }
+  Logger.log("testGen_MinWords_AllDays OK");
+}
+
+function testEdit_Prefixes() {
+  var it = {
+    meta: { city: "Almaty" },
+    days: [
+      {
+        number: "Day 1",
+        date: "15.01.2026",
+        name: "City Highlights",
+        time: "10:00–18:00",
+        location: "City Center",
+        overnight: "Almaty",
+        description: "Short description that is not long enough."
+      }
+    ]
+  };
+  if (typeof validateItinStruct_ !== "function") {
+    throw new Error("validateItinStruct_ not available.");
+  }
+  var out = validateItinStruct_(it, { strict: true });
+  if (out) {
+    throw new Error("Prefix validation failed: invalid itinerary should be rejected.");
+  }
+  Logger.log("testEdit_Prefixes OK");
+}
