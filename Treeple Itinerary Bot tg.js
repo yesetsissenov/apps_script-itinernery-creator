@@ -26,15 +26,11 @@ function doPost(e) {
   try {
     const update = safeJsonParse_(e && e.postData && e.postData.contents);
     if (update) {
-    if (isDuplicateUpdate_(update)) return HtmlService.createHtmlOutput("OK");
-    handleUpdate_(update);
-  }
+      // ВАЖНО: дедуп update_id (убирает дубли и “пачки”)
+      if (isDuplicateUpdate_(update)) return HtmlService.createHtmlOutput("OK");
+      handleUpdate_(update);
+    }
 
-
-    // ВАЖНО: дедуп update_id (убирает дубли и “пачки”)
-    if (isDuplicateUpdate_(update)) return HtmlService.createHtmlOutput("OK");
-
-    handleUpdate_(update);
     return HtmlService.createHtmlOutput("OK");
   } catch (err) {
     console.error(err && err.stack ? err.stack : err);
@@ -315,9 +311,6 @@ function onMessage_(m) {
       return sendLongMessage_(chatId, d0);
     }
 
-     // /docs = alias for /done
-     if (c === "/docs") c = "/done";
-
      if (c === "/done") {
      var itDone = getItin_();
      if (!itDone) return sendMessage_(chatId, "No itinerary to export. Use /new (or /gen).");
@@ -330,7 +323,14 @@ function onMessage_(m) {
      }
 
      sendMessage_(chatId, "⏳ Creating Google Doc from season template...");
-     var url = exportDocForChat(chatId, requestId); // requestId может быть пустым — см. новый DocsExport.gs ниже
+     var url = "";
+     try {
+       url = exportDocForChat(chatId, requestId); // requestId может быть пустым — см. новый DocsExport.gs ниже
+     } catch (eDoc) {
+       var msg = (eDoc && eDoc.message) ? eDoc.message : String(eDoc);
+       sendMessage_(chatId, "❌ Doc export failed: " + msg + "\nPlease verify TEMPLATE_*_ID and access to the template.");
+       return;
+     }
 
      // синк в days sheet (если есть)
      try { upsertDays_(requestId, itDone); } catch (e) {}
@@ -367,6 +367,10 @@ function onMessage_(m) {
       sess.data.req = req0;
       sess.data.requestId = reqId;
       setSession_(chatId, sess);
+      if (reqId) {
+        PropertiesService.getScriptProperties().setProperty("LAST_REQUEST_ID_" + chatId, String(reqId));
+        PropertiesService.getScriptProperties().setProperty("ITIN_" + String(reqId), JSON.stringify(it));
+      }
 
       // ✅ AUTO EXPORT
       if (typeof exportDocForChat !== "function") {
@@ -437,6 +441,10 @@ function onMessage_(m) {
        var requestId = (sess && sess.data && sess.data.requestId) ? String(sess.data.requestId) : "";
        if (!requestId) {
        requestId = PropertiesService.getScriptProperties().getProperty("LAST_REQUEST_ID_" + chatId) || "";
+       }
+       if (requestId) {
+         PropertiesService.getScriptProperties().setProperty("LAST_REQUEST_ID_" + chatId, String(requestId));
+         PropertiesService.getScriptProperties().setProperty("ITIN_" + String(requestId), JSON.stringify(parsed));
        }
 
        var docUrl = "";
