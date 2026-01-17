@@ -340,6 +340,10 @@ function onMessage_(m) {
      sp.setProperty("LAST_REQUEST_ID_" + chatId, requestId);
      sp.setProperty("ITIN_" + requestId, JSON.stringify(itDone));
 
+     if (typeof exportDocForChat !== "function") {
+       return sendMessage_(chatId, "❌ Missing exportDocForChat(chatId, requestId) in DocsExport.gs");
+     }
+
      sendMessage_(chatId, "⏳ Creating Google Doc from season template...");
      var url = "";
      try {
